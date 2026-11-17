@@ -194,8 +194,8 @@ jobs:
           p = pathlib.Path("vcpkg.json")
           manifest = json.loads(p.read_text())
           for dep in manifest["dependencies"]:
-              if isinstance(dep, dict) and dep.get("name") == "harfbuzz" and "android" not in dep["platform"]:
-                  dep["platform"] += " | android"
+              if isinstance(dep, dict) and dep.get("name") == "harfbuzz" and dep.get("platform") == "linux | bsd | windows":
+                  dep["platform"] = "linux | bsd | windows | android"
                   print("harfbuzz platform:", dep["platform"])
           p.write_text(json.dumps(manifest, indent=2) + "\n")
           PY
@@ -337,7 +337,21 @@ jobs:
         with:
           name: build-logs
           path: |
+            ladybird/UI/Android/.cxx/**/vcpkg-manifest-install.log
             ladybird/UI/Android/build/outputs/logs
-            ladybird/UI/Android/.cxx
+            ladybird/UI/Android/build/**/*.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Show CMake and vcpkg errors
+        if: failure()
+        run: |
+          set +e
+          for f in $(find ladybird/UI/Android/.cxx -name "vcpkg-manifest-install.log" 2>/dev/null); do
+            echo "===== $f"
+            grep -iE "error|warning: |failed" "$f" | head -40
+          done
+          for f in $(find ladybird/UI/Android/.cxx -name "*.log" -path "*CMake*" 2>/dev/null | head -3); do
+            echo "===== $f"
+            tail -n 60 "$f"
+          done

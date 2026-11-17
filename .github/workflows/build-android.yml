@@ -290,6 +290,43 @@ jobs:
           p.write_text(s)
           print("patched Libraries/LibIPC/Rust/src/shared_memory.rs")
           PY
+          # 4. Upstream tests AK_OS_LINUX (true on Android, since it is a Linux kernel) where the code
+          #    depends on sources that CMake only builds when LINUX is set (false on Android) because
+          #    bionic lacks the APIs they use (shm_open, Landlock/seccomp helpers, system FFmpeg).
+          python3 - <<'PY'
+          import pathlib
+          FILES = [
+              "Services/AudioServer/main.cpp",
+              "Services/MediaServer/main.cpp",
+              "Services/VideoDecoderServer/main.cpp",
+              "Services/Compositor/main.cpp",
+              "Libraries/LibMedia/DecoderRegistrations.cpp",
+              "Libraries/LibSandbox/Sandbox.h",
+              "Libraries/LibSandbox/Sandbox.cpp",
+              "Libraries/LibWebView/HelperProcess.cpp",
+              "Libraries/LibWebView/Process.h",
+              "Libraries/LibWebView/Process.cpp",
+          ]
+          GUARD = "(defined(AK_OS_LINUX) && !defined(AK_OS_ANDROID))"
+          for name in FILES:
+              p = pathlib.Path(name)
+              out = []
+              changed = 0
+              for line in p.read_text().splitlines():
+                  stripped = line.lstrip()
+                  if "AK_OS_LINUX" in line and "AK_OS_ANDROID" not in line:
+                      if stripped.startswith("#ifdef AK_OS_LINUX"):
+                          indent = line[: len(line) - len(stripped)]
+                          line = indent + "#if defined(AK_OS_LINUX) && !defined(AK_OS_ANDROID)"
+                          changed += 1
+                      elif stripped.startswith("#if") or stripped.startswith("#elif"):
+                          line = line.replace("defined(AK_OS_LINUX)", GUARD)
+                          changed += 1
+                  out.append(line)
+              assert changed, f"no AK_OS_LINUX guards patched in {name}"
+              p.write_text("\n".join(out) + "\n")
+              print(f"patched {name} ({changed} guards)")
+          PY
 
       - name: Build release APK (arm64-v8a)
         working-directory: ladybird/UI/Android

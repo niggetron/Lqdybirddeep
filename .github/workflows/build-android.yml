@@ -181,13 +181,24 @@ jobs:
           print(p.read_text())
           PY
 
-      - name: Patch Gradle for arm64-only signed release
+      - name: Patch build files (arm64 release, version name, vcpkg manifest)
         working-directory: ladybird
         env:
           VERSION_NAME: ${{ steps.ver.outputs.version_name }}
           VERSION_CODE: ${{ steps.ver.outputs.version_code }}
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib
+          # Upstream only pulls harfbuzz for desktop platforms, but LibGfx needs it on Android too.
+          p = pathlib.Path("vcpkg.json")
+          manifest = json.loads(p.read_text())
+          for dep in manifest["dependencies"]:
+              if isinstance(dep, dict) and dep.get("name") == "harfbuzz" and "android" not in dep["platform"]:
+                  dep["platform"] += " | android"
+                  print("harfbuzz platform:", dep["platform"])
+          p.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
           python3 - <<'PY'
           import os, pathlib, re
           p = pathlib.Path("UI/Android/build.gradle.kts")

@@ -1,0 +1,258 @@
+name: Ladybird Android (arm64-v8a)
+
+# Builds the Ladybird browser Android app from the upstream LadybirdBrowser/ladybird
+# sources for arm64 devices, signs it, and publishes it to this repository's
+# Releases tab. Every push to main, every manual run and the weekly schedule
+# produce a new build with an updated version name.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ladybird_ref:
+        description: "Ladybird tag/branch/commit to build (empty = newest upstream release tag)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: https://github.com/LadybirdBrowser/ladybird.git
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_NDK_VERSION: "29.0.13599879"
+  ABI: arm64-v8a
+  CCACHE_DIR: /home/runner/.cache/ccache
+  CCACHE_MAXSIZE: 4G
+  CCACHE_COMPILERCHECK: content
+  CCACHE_SLOPPINESS: time_macros,include_file_ctime,include_file_mtime
+  CCACHE_BASEDIR: /home/runner/work
+  VCPKG_MAX_CONCURRENCY: "4"
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false"
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    name: Build signed arm64 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+
+      - name: Resolve version name
+        id: ver
+        run: |
+          set -euo pipefail
+          REF="${{ inputs.ladybird_ref }}"
+          if [ -z "${REF}" ]; then
+            REF=$(git ls-remote --tags --refs "${UPSTREAM}" \
+                  | awk '{print $2}' | sed 's|refs/tags/||' \
+                  | grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)
+          fi
+          if [ -z "${REF}" ]; then REF=master; fi
+          BASE="${REF}"
+          BUILD="${{ github.run_number }}"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${BASE}+b${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "version_code=$((1000 + BUILD))" >> "$GITHUB_OUTPUT"
+          echo "release_tag=ladybird-android-${BASE}-b${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=Ladybird-${BASE}-arm64-v8a-b${BUILD}.apk" >> "$GITHUB_OUTPUT"
+          echo "Building Ladybird ${REF} as version ${BASE}+b${BUILD}"
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/lib/android/sdk/system-images \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/ndk \
+            /usr/local/lib/android/sdk/sources || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            autoconf autoconf-archive automake bison build-essential ccache flex \
+            gperf libtool nasm ninja-build pkg-config python3-venv tar unzip zip \
+            zlib1g-dev
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Clone Ladybird at ${{ steps.ver.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ steps.ver.outputs.ref }}" "${UPSTREAM}" ladybird \
+            || { git clone --depth 1 "${UPSTREAM}" ladybird && \
+                 cd ladybird && git fetch --depth 1 origin "${{ steps.ver.outputs.ref }}" && \
+                 git checkout FETCH_HEAD; }
+          cd ladybird
+          git log -1 --format='Ladybird commit: %H %s'
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/ladybird_commit.txt"
+
+      - name: Set up Rust toolchain (as pinned by Ladybird)
+        working-directory: ladybird
+        run: |
+          set -euo pipefail
+          rustup --version
+          rustup show
+          rustc --version
+          cargo --version
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          set -euo pipefail
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" --version
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install --sdk_root="${ANDROID_HOME}" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.31.6" \
+            "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          ls "${ANDROID_HOME}/ndk"
+
+      - name: Restore compiler and vcpkg caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cache/ccache
+            ladybird/Build/caches/vcpkg-binary-cache
+          key: ladybird-android-${{ steps.ver.outputs.ref }}-${{ github.run_id }}
+          restore-keys: |
+            ladybird-android-${{ steps.ver.outputs.ref }}-
+            ladybird-android-
+
+      - name: Bootstrap vcpkg
+        working-directory: ladybird
+        run: |
+          set -euo pipefail
+          ./Meta/ladybird.py vcpkg --preset Release
+          echo "VCPKG_ROOT=${GITHUB_WORKSPACE}/ladybird/Build/vcpkg-release" >> "$GITHUB_ENV"
+          ccache --max-size="${CCACHE_MAXSIZE}" || true
+          ccache --zero-stats || true
+
+      - name: Patch Gradle for arm64-only signed release
+        working-directory: ladybird
+        env:
+          VERSION_NAME: ${{ steps.ver.outputs.version_name }}
+          VERSION_CODE: ${{ steps.ver.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, re
+          p = pathlib.Path("UI/Android/build.gradle.kts")
+          s = p.read_text()
+          s = s.replace('abiFilters += listOf("x86_64", "arm64-v8a")', 'abiFilters += listOf("arm64-v8a")')
+          assert 'abiFilters += listOf("arm64-v8a")' in s, "abiFilters patch failed"
+          s = re.sub(r'versionCode = \d+', 'versionCode = %s' % os.environ["VERSION_CODE"], s, count=1)
+          s = re.sub(r'versionName = "[^"]*"', 'versionName = "%s"' % os.environ["VERSION_NAME"], s, count=1)
+          p.write_text(s)
+          print("patched build.gradle.kts")
+          PY
+          grep -n -E "versionCode|versionName|abiFilters" UI/Android/build.gradle.kts
+
+      - name: Build release APK (arm64-v8a)
+        working-directory: ladybird/UI/Android
+        run: |
+          set -euo pipefail
+          export LADYBIRD_CACHE_DIR="${GITHUB_WORKSPACE}/ladybird/Build/caches"
+          # Leave headroom under the job timeout so caches are still saved on a slow run.
+          status=0
+          timeout 18600 ./gradlew assembleRelease --no-daemon --stacktrace || status=$?
+          ccache --show-stats || true
+          exit "${status}"
+
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          APK_NAME: ${{ steps.ver.outputs.apk_name }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="${ANDROID_HOME}/build-tools/35.0.0"
+          UNSIGNED=$(find ladybird/UI/Android/build/outputs/apk/release -name "*.apk" | head -n1)
+          echo "unsigned apk: ${UNSIGNED}"
+          ls -l ladybird/UI/Android/build/outputs/apk/release
+          mkdir -p out
+          echo "${KS_B64}" | base64 -d > out/keystore.jks
+          "${BUILD_TOOLS}/zipalign" -p -f 4 "${UNSIGNED}" out/aligned.apk
+          "${BUILD_TOOLS}/apksigner" sign \
+            --ks out/keystore.jks --ks-key-alias "${KEY_ALIAS}" \
+            --ks-pass "pass:${KS_PASS}" --key-pass "pass:${KEY_PASS}" \
+            --out "out/${APK_NAME}" out/aligned.apk
+          "${BUILD_TOOLS}/apksigner" verify --print-certs "out/${APK_NAME}"
+          (cd out && sha256sum "${APK_NAME}" > "${APK_NAME}.sha256")
+          rm -f out/keystore.jks out/aligned.apk
+          ls -l out
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.apk_name }}
+          path: |
+            out/${{ steps.ver.outputs.apk_name }}
+            out/${{ steps.ver.outputs.apk_name }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_NAME: ${{ steps.ver.outputs.version_name }}
+          RELEASE_TAG: ${{ steps.ver.outputs.release_tag }}
+          APK_NAME: ${{ steps.ver.outputs.apk_name }}
+          LADYBIRD_REF: ${{ steps.ver.outputs.ref }}
+        run: |
+          set -euo pipefail
+          COMMIT=$(cat ladybird_commit.txt)
+          cat > notes.md <<EOF
+          Ladybird browser for Android, built from upstream [LadybirdBrowser/ladybird](https://github.com/LadybirdBrowser/ladybird) \`${LADYBIRD_REF}\`.
+
+          - **Version name:** \`${VERSION_NAME}\`
+          - **Commit:** \`${COMMIT}\`
+          - **ABI:** arm64-v8a (64-bit ARM phones/tablets)
+          - **Android:** 11 (API 30) or newer
+          - **Signed:** yes, installable and updatable in place
+
+          ### Install
+
+          1. Download \`${APK_NAME}\` below.
+          2. Open it on the phone and allow installing from this source when asked.
+          3. If an older Ladybird build from this repo is installed, it upgrades in place.
+
+          Built automatically by GitHub Actions on $(date -u '+%Y-%m-%d %H:%M UTC').
+          EOF
+          gh release create "${RELEASE_TAG}" \
+            "out/${APK_NAME}" \
+            "out/${APK_NAME}.sha256" \
+            --title "Ladybird Android ${VERSION_NAME} (arm64)" \
+            --notes-file notes.md \
+            --latest
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            ladybird/UI/Android/build/outputs/logs
+            ladybird/UI/Android/.cxx
+          if-no-files-found: ignore
+          retention-days: 7

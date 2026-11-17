@@ -294,7 +294,7 @@ jobs:
           #    depends on sources that CMake only builds when LINUX is set (false on Android) because
           #    bionic lacks the APIs they use (shm_open, Landlock/seccomp helpers, system FFmpeg).
           python3 - <<'PY'
-          import pathlib
+          import pathlib, re
           FILES = [
               "Services/AudioServer/main.cpp",
               "Services/MediaServer/main.cpp",
@@ -306,22 +306,23 @@ jobs:
               "Libraries/LibWebView/HelperProcess.cpp",
               "Libraries/LibWebView/Process.h",
               "Libraries/LibWebView/Process.cpp",
+              "Libraries/LibWebView/CrashReport.cpp",
           ]
           GUARD = "(defined(AK_OS_LINUX) && !defined(AK_OS_ANDROID))"
+          IF_LINUX = re.compile(r"^\s*#\s*(?:if|elif|ifdef)\b")
+          IFDEF_LINUX = re.compile(r"^(\s*)#\s*ifdef\s+AK_OS_LINUX\s*$")
           for name in FILES:
               p = pathlib.Path(name)
               out = []
               changed = 0
               for line in p.read_text().splitlines():
-                  stripped = line.lstrip()
-                  if "AK_OS_LINUX" in line and "AK_OS_ANDROID" not in line:
-                      if stripped.startswith("#ifdef AK_OS_LINUX"):
-                          indent = line[: len(line) - len(stripped)]
-                          line = indent + "#if defined(AK_OS_LINUX) && !defined(AK_OS_ANDROID)"
-                          changed += 1
-                      elif stripped.startswith("#if") or stripped.startswith("#elif"):
+                  if "AK_OS_LINUX" in line and "AK_OS_ANDROID" not in line and IF_LINUX.match(line):
+                      match = IFDEF_LINUX.match(line)
+                      if match:
+                          line = f"{match.group(1)}#if defined(AK_OS_LINUX) && !defined(AK_OS_ANDROID)"
+                      else:
                           line = line.replace("defined(AK_OS_LINUX)", GUARD)
-                          changed += 1
+                      changed += 1
                   out.append(line)
               assert changed, f"no AK_OS_LINUX guards patched in {name}"
               p.write_text("\n".join(out) + "\n")
@@ -381,6 +382,18 @@ jobs:
           assert s.count(old) == 1, "wasm interpreter cfg not found"
           p.write_text(s.replace(old, new, 1))
           print("patched Libraries/LibWasm/Engine/src/runtime/interpreter.rs")
+          PY
+          # 7. The desktop helper executables are linked with --no-undefined on Android too, but they get
+          #    LibIPC only transitively through a shared helper library, so name it explicitly.
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("Services/ImageDecoder/CMakeLists.txt")
+          old = "target_link_libraries(ImageDecoder PRIVATE imagedecoderservice LibCore LibMain LibSandbox LibThreading)"
+          new = "target_link_libraries(ImageDecoder PRIVATE imagedecoderservice LibCore LibIPC LibMain LibSandbox LibThreading)"
+          s = p.read_text()
+          assert old in s, "ImageDecoder link line not found"
+          p.write_text(s.replace(old, new, 1))
+          print("patched Services/ImageDecoder/CMakeLists.txt")
           PY
 
       - name: Build release APK (arm64-v8a)

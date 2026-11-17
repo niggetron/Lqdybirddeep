@@ -91,6 +91,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
       - name: Clone Ladybird at ${{ steps.ver.outputs.ref }}
         run: |
           set -euo pipefail
@@ -164,16 +169,45 @@ jobs:
           p.write_text(s)
           print("patched build.gradle.kts")
           PY
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("UI/Android/settings.gradle.kts")
+          out = []
+          for line in p.read_text().splitlines():
+              stripped = line.strip()
+              if stripped == "mavenCentral()":
+                  indent = line[: len(line) - len(line.lstrip())]
+                  out.append(f'{indent}maven {{ url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }}')
+              out.append(line)
+          p.write_text("\n".join(out) + "\n")
+          print("patched settings.gradle.kts")
+          PY
           grep -n -E "versionCode|versionName|abiFilters" UI/Android/build.gradle.kts
+          grep -n -A3 "repositories" UI/Android/settings.gradle.kts | head -20
 
       - name: Build release APK (arm64-v8a)
         working-directory: ladybird/UI/Android
         run: |
-          set -euo pipefail
+          set -uo pipefail
           export LADYBIRD_CACHE_DIR="${GITHUB_WORKSPACE}/ladybird/Build/caches"
           # Leave headroom under the job timeout so caches are still saved on a slow run.
-          status=0
-          timeout 18600 ./gradlew assembleRelease --no-daemon --stacktrace || status=$?
+          deadline=$(( $(date +%s) + 18600 ))
+          status=1
+          for attempt in 1 2 3; do
+            remaining=$(( deadline - $(date +%s) ))
+            if [ "${remaining}" -le 120 ]; then
+              echo "No time left for another Gradle attempt."
+              break
+            fi
+            echo "=== Gradle assembleRelease attempt ${attempt} (budget ${remaining}s) ==="
+            if timeout "${remaining}" ./gradlew assembleRelease --no-daemon --stacktrace --max-workers=4; then
+              status=0
+              break
+            fi
+            status=$?
+            echo "Attempt ${attempt} failed with exit code ${status}; retrying shortly."
+            sleep 90
+          done
           ccache --show-stats || true
           exit "${status}"
 

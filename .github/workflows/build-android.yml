@@ -226,6 +226,18 @@ jobs:
           grep -n -E "versionCode|versionName|abiFilters" UI/Android/build.gradle.kts
           grep -n -A3 "repositories" UI/Android/settings.gradle.kts | head -20
 
+      - name: Apply upstream build fixes for Android
+        working-directory: ladybird
+        run: |
+          set -euo pipefail
+          # 1. Upstream typo: Notifier is passed by value instead of by pointer (Android-only branch).
+          F="Libraries/LibCore/EventLoopImplementationUnix.cpp"
+          if grep -q "post_event(notifier, Core::Event::Type::NotifierActivation)" "$F"; then
+            sed -i 's/post_event(notifier, Core::Event::Type::NotifierActivation)/post_event(\&notifier, Core::Event::Type::NotifierActivation)/' "$F"
+            echo "patched $F"
+          fi
+          grep -n "post_event(&notifier, Core::Event::Type::NotifierActivation)" "$F" || true
+
       - name: Build release APK (arm64-v8a)
         working-directory: ladybird/UI/Android
         run: |
@@ -241,11 +253,13 @@ jobs:
               break
             fi
             echo "=== Gradle assembleRelease attempt ${attempt} (budget ${remaining}s) ==="
-            if timeout "${remaining}" ./gradlew assembleRelease --no-daemon --stacktrace --max-workers=4; then
+            rc=0
+            timeout "${remaining}" ./gradlew assembleRelease --no-daemon --stacktrace --max-workers=4 || rc=$?
+            if [ "${rc}" -eq 0 ]; then
               status=0
               break
             fi
-            status=$?
+            status=${rc}
             echo "Attempt ${attempt} failed with exit code ${status}; retrying shortly."
             sleep 90
           done

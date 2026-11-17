@@ -327,6 +327,61 @@ jobs:
               p.write_text("\n".join(out) + "\n")
               print(f"patched {name} ({changed} guards)")
           PY
+          # 5. The Android service entry points still use the old IPC client factory: clients are now
+          #    created with construct() instead of try_create(), and RequestServer wants its maps.
+          python3 - <<'PY'
+          import pathlib
+          replacements = [
+              (
+                  "UI/Android/src/main/cpp/ImageDecoderService.cpp",
+                  "    auto client = TRY(ImageDecoder::ConnectionFromClient::try_create(make<IPC::Transport>(move(socket))));",
+                  "    auto client = ImageDecoder::ConnectionFromClient::construct(make<IPC::Transport>(move(socket)));",
+              ),
+              (
+                  "UI/Android/src/main/cpp/WebContentService.cpp",
+                  "    auto webcontent_client = TRY(WebContent::ConnectionFromClient::try_create(make<IPC::Transport>(move(webcontent_socket))));",
+                  "    auto webcontent_client = WebContent::ConnectionFromClient::construct(make<IPC::Transport>(move(webcontent_socket)), is_test_mode);",
+              ),
+              (
+                  "UI/Android/src/main/cpp/RequestServerService.cpp",
+                  "#include <RequestServer/ConnectionFromClient.h>",
+                  "#include <RequestServer/CURL.h>\n#include <RequestServer/ConnectionFromClient.h>",
+              ),
+              (
+                  "UI/Android/src/main/cpp/RequestServerService.cpp",
+                  "    auto socket = TRY(Core::LocalSocket::adopt_fd(ipc_socket));\n    auto client = TRY(RequestServer::ConnectionFromClient::try_create(make<IPC::Transport>(move(socket))));",
+                  "    TRY(RequestServer::initialize_libcurl());\n\n"
+                  "    auto socket = TRY(Core::LocalSocket::adopt_fd(ipc_socket));\n"
+                  "    // NB: The client keeps references to these maps, so they have to outlive it.\n"
+                  "    RequestServer::ConnectionFromClient::ConnectionMap connections;\n"
+                  "    RequestServer::ConnectionFromClient::RequestTransferLeaseMap request_transfer_leases;\n"
+                  "    auto client = RequestServer::ConnectionFromClient::construct(\n"
+                  "        make<IPC::Transport>(move(socket)),\n"
+                  "        RequestServer::IsPrivate::No,\n"
+                  "        RequestServer::SiteBinding::Bound,\n"
+                  "        connections,\n"
+                  "        request_transfer_leases,\n"
+                  "        {});",
+              ),
+          ]
+          for name, old, new in replacements:
+              p = pathlib.Path(name)
+              s = p.read_text()
+              assert old in s, f"{name}: pattern not found\n{old}"
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {name}")
+          PY
+          # 6. libwasm_engine: bionic's aarch64 ucontext_t has the same pc field as glibc's.
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("Libraries/LibWasm/Engine/src/runtime/interpreter.rs")
+          s = p.read_text()
+          old = '#[cfg(all(target_os = "linux", target_arch = "aarch64"))]'
+          new = '#[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]'
+          assert s.count(old) == 1, "wasm interpreter cfg not found"
+          p.write_text(s.replace(old, new, 1))
+          print("patched Libraries/LibWasm/Engine/src/runtime/interpreter.rs")
+          PY
 
       - name: Build release APK (arm64-v8a)
         working-directory: ladybird/UI/Android

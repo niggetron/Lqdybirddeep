@@ -346,7 +346,7 @@ jobs:
               (
                   "UI/Android/src/main/cpp/RequestServerService.cpp",
                   "#include <RequestServer/ConnectionFromClient.h>",
-                  "#include <RequestServer/CURL.h>\n#include <RequestServer/ConnectionFromClient.h>",
+                  "#include <LibHTTP/DiskCache.h>\n#include <RequestServer/CURL.h>\n#include <RequestServer/ConnectionFromClient.h>",
               ),
               (
                   "UI/Android/src/main/cpp/RequestServerService.cpp",
@@ -362,7 +362,7 @@ jobs:
                   "        RequestServer::SiteBinding::Bound,\n"
                   "        connections,\n"
                   "        request_transfer_leases,\n"
-                  "        {});",
+                  "        Optional<HTTP::DiskCache&> {});",
               ),
           ]
           for name, old, new in replacements:
@@ -394,6 +394,22 @@ jobs:
           assert old in s, "ImageDecoder link line not found"
           p.write_text(s.replace(old, new, 1))
           print("patched Services/ImageDecoder/CMakeLists.txt")
+          PY
+          # 8. Upstream permits duplicate Rust staticlib symbols on static ELF links, but its condition
+          #    (LINUX OR BSD) leaves Android out, where BUILD_SHARED_LIBS is also off.
+          python3 - <<'PY'
+          import pathlib
+          old = "((LINUX OR BSD) AND NOT BUILD_SHARED_LIBS)"
+          new = "((LINUX OR BSD OR ANDROID) AND NOT BUILD_SHARED_LIBS)"
+          changed = 0
+          for root in ("Libraries", "Services"):
+              for p in pathlib.Path(root).rglob("CMakeLists.txt"):
+                  s = p.read_text()
+                  if old in s:
+                      changed += s.count(old)
+                      p.write_text(s.replace(old, new))
+                      print("patched", p)
+          assert changed >= 5, f"only {changed} allow-multiple-definition conditions patched"
           PY
 
       - name: Build release APK (arm64-v8a)

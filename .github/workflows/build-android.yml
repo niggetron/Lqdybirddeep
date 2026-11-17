@@ -272,6 +272,24 @@ jobs:
           p.write_text(s)
           print("patched Meta/CMake/rust_crate.cmake")
           PY
+          # 3. bionic has no shm_open()/shm_unlink(); memfd_create() exists since API 30 (our minSdk),
+          #    so Android can share the Linux implementation of create_anonymous_file().
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("Libraries/LibIPC/Rust/src/shared_memory.rs")
+          s = p.read_text()
+          s = s.replace(
+              '#[cfg(target_os = "linux")]\npub(crate) fn create_anonymous_file()',
+              '#[cfg(any(target_os = "linux", target_os = "android"))]\npub(crate) fn create_anonymous_file()',
+          )
+          s = s.replace(
+              '#[cfg(not(target_os = "linux"))]\npub(crate) fn create_anonymous_file()',
+              '#[cfg(not(any(target_os = "linux", target_os = "android")))]\npub(crate) fn create_anonymous_file()',
+          )
+          assert s.count('any(target_os = "linux", target_os = "android")') == 2, "shared_memory.rs patch failed"
+          p.write_text(s)
+          print("patched Libraries/LibIPC/Rust/src/shared_memory.rs")
+          PY
 
       - name: Build release APK (arm64-v8a)
         working-directory: ladybird/UI/Android

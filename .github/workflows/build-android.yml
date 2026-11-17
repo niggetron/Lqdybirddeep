@@ -15,6 +15,8 @@ on:
         required: false
         default: ""
   schedule:
+    # Every 7 days: Mondays at 03:00 UTC. Picks up the newest upstream Ladybird code
+    # and publishes a fresh release with an updated version name.
     - cron: "0 3 * * 1"
 
 permissions:
@@ -132,7 +134,8 @@ jobs:
           ls "${ANDROID_HOME}/ndk"
 
       - name: Restore compiler and vcpkg caches
-        uses: actions/cache@v4
+        id: cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             /home/runner/.cache/ccache
@@ -150,6 +153,33 @@ jobs:
           echo "VCPKG_ROOT=${GITHUB_WORKSPACE}/ladybird/Build/vcpkg-release" >> "$GITHUB_ENV"
           ccache --max-size="${CCACHE_MAXSIZE}" || true
           ccache --zero-stats || true
+
+      - name: Allow build-machine compilers for meson cross builds
+        # vcpkg's cross-build native file sets the build-machine compilers to `false`, but newer
+        # meson versions (used by e.g. libpsl) hard-error when a project asks for one.
+        working-directory: ladybird
+        run: |
+          set -euo pipefail
+          NATIVE_FILE="Build/vcpkg-release/scripts/buildsystems/meson/none.txt"
+          python3 - "$NATIVE_FILE" <<'PY'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          text = p.read_text()
+          replacements = {
+              "c": "/usr/bin/gcc",
+              "cpp": "/usr/bin/g++",
+              "ar": "/usr/bin/ar",
+              "pkgconfig": "/usr/bin/pkg-config",
+          }
+          out = []
+          for line in text.splitlines():
+              key = line.split("=")[0].strip()
+              if key in replacements and "false" in line:
+                  line = f"{key} = ['{replacements[key]}']"
+              out.append(line)
+          p.write_text("\n".join(out) + "\n")
+          print(p.read_text())
+          PY
 
       - name: Patch Gradle for arm64-only signed release
         working-directory: ladybird
@@ -210,6 +240,16 @@ jobs:
           done
           ccache --show-stats || true
           exit "${status}"
+
+      - name: Save compiler and vcpkg caches
+        # Saved even when the build fails, so the next run continues where this one stopped.
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /home/runner/.cache/ccache
+            ladybird/Build/caches/vcpkg-binary-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Sign APK
         env:

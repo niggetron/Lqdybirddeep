@@ -346,7 +346,7 @@ jobs:
               (
                   "UI/Android/src/main/cpp/RequestServerService.cpp",
                   "#include <RequestServer/ConnectionFromClient.h>",
-                  "#include <LibHTTP/DiskCache.h>\n#include <RequestServer/CURL.h>\n#include <RequestServer/ConnectionFromClient.h>",
+                  "#include <LibHTTP/Cache/DiskCache.h>\n#include <RequestServer/CURL.h>\n#include <RequestServer/ConnectionFromClient.h>",
               ),
               (
                   "UI/Android/src/main/cpp/RequestServerService.cpp",
@@ -410,6 +410,45 @@ jobs:
                       p.write_text(s.replace(old, new))
                       print("patched", p)
           assert changed >= 5, f"only {changed} allow-multiple-definition conditions patched"
+          PY
+          # 9. The Android Skia port is built without FreeType, so it has no font manager that can
+          #    load a typeface from memory. The Compositor process is not used by the Android UI
+          #    yet, so fall through to "no Skia typeface" instead of referencing a missing symbol.
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("Services/Compositor/FontSkia.cpp")
+          s = p.read_text()
+          old = "".join([
+              "    // FreeType also loads some data that the font manager of the platform does not.\n",
+              "    static NeverDestroyed<sk_sp<SkFontMgr>> font_manager { SkFontMgr_New_Custom_Empty() };\n",
+              "    if (auto skia_typeface = (*font_manager)->makeFromStream(std::make_unique<SkMemoryStream>(data), SkFontArguments {}.setCollectionIndex(static_cast<int>(typeface.collection_index()))))\n",
+              "        return skia_typeface;\n",
+          ])
+          new = "#if !defined(AK_OS_ANDROID)\n" + old + "#endif\n"
+          assert old in s, "FontSkia.cpp custom font manager block not found"
+          p.write_text(s.replace(old, new, 1))
+          print("patched Services/Compositor/FontSkia.cpp")
+          PY
+          # 10. libwasm_engine denies warnings, and on Android the JIT (and with it the only reader
+          #     of the trap exit stub) is compiled out.
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("Libraries/LibWasm/Engine/src/runtime/jit.rs")
+          s = p.read_text()
+          old = "".join([
+              "    pub struct Stubs {\n",
+              "        pub trap_exit: u64,\n",
+              "        pub entry: u64,",
+          ])
+          new = "".join([
+              "    pub struct Stubs {\n",
+              "        #[allow(dead_code)] // Read only by the fault handler, which exists only where the JIT does.\n",
+              "        pub trap_exit: u64,\n",
+              "        pub entry: u64,",
+          ])
+          assert s.count(old) == 1, "jit.rs Stubs struct not found"
+          p.write_text(s.replace(old, new, 1))
+          print("patched Libraries/LibWasm/Engine/src/runtime/jit.rs")
           PY
 
       - name: Build release APK (arm64-v8a)
